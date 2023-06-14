@@ -105,12 +105,12 @@ int tc_egress(struct __sk_buff *skb) {
             return TC_ACT_OK;
         }
 
-        struct icmp_ct_val icmp_val = {
-          .reply = 0,
-          .src_ip = ip4->saddr,
+        struct icmp_ct_val new_icmp_val = {
+            .src_ip = ip4->saddr,
+            .reply = 0,
         };
 
-        bpf_map_update_elem(&ICMP_CT, &icmp_pkt->un.echo.id, &icmp_val, BPF_ANY);
+        bpf_map_update_elem(&ICMP_CT, &icmp_pkt->un.echo.id, &new_icmp_val, BPF_ANY);
         sum = csum_diff((void *)&ip4->saddr, 4, (void *)&nat_ip, 4, 0);
         skb_store_bytes(skb, l3_off + offsetof(struct iphdr, saddr), (void *)&nat_ip, 4, 0);
         l3_csum_replace(skb, l3_off + offsetof(struct iphdr, check), 0, sum, 0);
@@ -180,12 +180,12 @@ int tc_ingress(struct __sk_buff *skb) {
         struct icmp_ct_val *icmp_val = bpf_map_lookup_elem(&ICMP_CT, &icmp_pkt->un.echo.id);
         if (icmp_val) {
             const __be32 * src_ip = &icmp_val->src_ip;
+            icmp_val->reply = 1;
+            bpf_map_update_elem(&ICMP_CT, &icmp_pkt->un.echo.id, &icmp_val, BPF_EXIST);
+
             sum = csum_diff((void *)&ip4->daddr, 4, (void *)src_ip, 4, 0);
             skb_store_bytes(skb, l3_off + offsetof(struct iphdr, daddr), (void *)src_ip, 4, 0);
             l3_csum_replace(skb, l3_off + offsetof(struct iphdr, check), 0, sum, 0);
-
-            icmp_val->reply = 1;
-            bpf_map_update_elem(&ICMP_CT, &icmp_pkt->un.echo.id, &icmp_val, BPF_ANY);
         }
         
     } else if (ip4->protocol == IPPROTO_TCP) {
