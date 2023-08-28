@@ -22,14 +22,28 @@
 #endif
 
 
-const __be32 backend_ip = IPV4(200,0,0,30);
-unsigned char backend_mac[ETH_ALEN] = {0x52,0x54,0x00,0x80,0x76,0xef}; //52:54:00:80:76:ef
+const __be32 backend_ip = IPV4(10,0,0,20);
+unsigned char backend_mac[ETH_ALEN] = {0x00,0x00,0x00,0x00,0x01,0x02}; //{0x52,0x54,0x00,0x80,0x76,0xef}; //52:54:00:80:76:ef
 
-const __be32 lb_ip = IPV4(200,0,0,50);
-unsigned char lb_mac[ETH_ALEN] = {0x52,0x54,0x00,0x82,0x45,0x28};  //52:54:00:82:45:28
+const __be32 lb_ip = IPV4(10,0,0,10);
+unsigned char lb_mac[ETH_ALEN] = {0x00,0x00,0x00,0x00,0x01,0x01}; //{0x52,0x54,0x00,0x82,0x45,0x28};  //52:54:00:82:45:28
 
 const __be32 client_ip = IPV4(200,0,0,100);
 unsigned char client_mac[ETH_ALEN] = {0x52,0x54,0x00,0x1d,0xf2,0x18};  //52:54:00:1d:f2:18 
+
+struct ct {
+	__be32 cl_addr;
+    unsigned char c_mac[ETH_ALEN];
+	__be16 sport;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, __be16);
+	__type(value, struct ct);
+	__uint(max_entries, 32);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} LB4_XDP SEC(".maps");
 
 static __always_inline __u16 csum_fold_helper(__u64 csum) {
     int i;
@@ -91,18 +105,38 @@ int load_balancer(struct xdp_md *ctx) {
     }
     
     // Check tcp port
-    if (tcph->dest != (80 << 8) && iph->saddr == client_ip) {
+    if (bpf_ntohs(tcph->dest) != 80) {
         return rc;
     }
 
-    if (iph->saddr == client_ip) {
-        // Override mac address
+    struct ct *ct_val = bpf_map_lookup_elem(&LB4_XDP, &tcph->source);
+    if (ct_val) {
+        iph->daddr = ct_val->cl_addr;
+        memcpy(eth->h_dest,ct_val->c_mac,ETH_ALEN);
+    } else {
+        bpf_printk("new client %lu",iph->addrs.saddr);
+        struct ct new_ct = {
+            .cl_addr = iph->addrs.saddr,
+            .sport = tcph->source,
+        };
+
+        memcpy(new_ct.c_mac, eth->h_source, ETH_ALEN);
+
+        bpf_printk("sport %lu addr %lu mac %s",new_ct.sport,new_ct.cl_addr,new_ct.c_mac);
+        bpf_map_update_elem(&LB4_XDP, &tcph->source, &new_ct, BPF_NOEXIST);
+
         iph->daddr = backend_ip;
         memcpy(eth->h_dest, backend_mac, ETH_ALEN);
-    } else {
-        iph->daddr = client_ip;
-        memcpy(eth->h_dest, client_mac, ETH_ALEN);
     }
+
+//    if (iph->saddr == client_ip) {
+//        // Override mac address
+//        iph->daddr = backend_ip;
+//        memcpy(eth->h_dest, backend_mac, ETH_ALEN);
+//    } else {
+//        iph->daddr = client_ip;
+//        memcpy(eth->h_dest, client_mac, ETH_ALEN);
+//    }
 
 
     iph->saddr = lb_ip;
