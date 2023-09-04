@@ -1,14 +1,4 @@
-
-#define KBUILD_MODNAME "load_balancer"
-#include <linux/bpf.h>     // struct __sk_buff
-#include <bpf/bpf_helpers.h>
-#include <linux/in.h>
-#include <linux/if_ether.h>
-#include <linux/if_packet.h>
-#include <linux/if_vlan.h>
-#include <linux/ip.h>
-#include <linux/ipv6.h>
-#include <linux/tcp.h>
+#include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
@@ -21,14 +11,21 @@
 #define memcpy(dest, src, n) __builtin_memcpy((dest), (src), (n))
 #endif
 
-//const __be32 backend_ip = IPV4(200,0,0,30);
-//unsigned char backend_mac[ETH_ALEN] = {0x52,0x54,0x00,0x80,0x76,0xef}; //52:54:00:80:76:ef
+#define ETH_ALEN	6
+#define ETH_P_IP	0x0800		/* Internet Protocol packet	*/
 
-const __be32 lb_ip = IPV4(200,0,0,50);
-unsigned char lb_mac[ETH_ALEN] = {0x52,0x54,0x00,0x82,0x45,0x28};  //52:54:00:82:45:28
+struct lb_ip {
+    unsigned char lb_mac[ETH_ALEN];
+    __be32 be_count;
+};
 
-//const __be32 client_ip = IPV4(200,0,0,100);
-//unsigned char client_mac[ETH_ALEN] = {0x52,0x54,0x00,0x1d,0xf2,0x18};  //52:54:00:1d:f2:18 
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, __be32);
+	__type(value, struct lb_ip);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+    __uint(max_entries, 256);
+} LB4_LB_XDP SEC(".maps");
 
 struct backend {
 	__be32 s_addr;
@@ -36,23 +33,22 @@ struct backend {
     __be16 pad;
 };
 
-#define MAX_BE 2
-
-struct backend backends[MAX_BE] = {
-    {
-        .s_addr = IPV4(200,0,0,30),
-        .s_mac = {0x52,0x54,0x00,0x80,0x76,0xef},
-    },
-    {
-        .s_addr = IPV4(200,0,0,10),
-        .s_mac = {0x52,0x54,0x00,0xa3,0xc4,0xa0},
-    },
-};
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, __be32);
+	__type(value, struct backend);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+    __uint(max_entries, 256);
+} LB4_BE_XDP SEC(".maps");
 
 struct ct {
 	__be32 cl_addr;
     unsigned char c_mac[ETH_ALEN];
-    struct backend be;
+    union 
+    {
+        struct backend be;
+    };
+    
 };
 
 struct ct_key {
@@ -67,7 +63,7 @@ struct {
 	__type(value, struct ct);
     __uint(pinning, LIBBPF_PIN_BY_NAME);
     __uint(max_entries, 65536*2);
-} LB4_XDP SEC(".maps");
+} LB4_CT_XDP SEC(".maps");
 
 
 static __always_inline __u16 csum_fold_helper(__u64 csum) {
@@ -86,6 +82,7 @@ static __always_inline __u16 iph_csum(struct iphdr *iph) {
     unsigned long long csum = bpf_csum_diff(0, 0, (unsigned int *)iph, sizeof(struct iphdr), 0);
     return csum_fold_helper(csum);
 }
+
 
 SEC("xdp_lb")
 int load_balancer(struct xdp_md *ctx) {
@@ -129,7 +126,12 @@ int load_balancer(struct xdp_md *ctx) {
         return XDP_PASS;
     }
     
-    if (iph->daddr == lb_ip) {
+    // Save the lb ip addr
+    const __be32 old_lb = iph->daddr; 
+
+    // Find the lb ip addr
+    struct lb_ip *lb = bpf_map_lookup_elem(&LB4_LB_XDP, &iph->daddr);
+    if (lb) {
         // Check tcp port
         // Client -> lb and filter it with port 80
         if (bpf_ntohs(tcph->dest) == 80) {
@@ -139,35 +141,43 @@ int load_balancer(struct xdp_md *ctx) {
                 .dst = iph->daddr,
             };
 
-            struct backend real_be;
-            struct ct *client = bpf_map_lookup_elem(&LB4_XDP, &key);
+            struct ct *client = bpf_map_lookup_elem(&LB4_CT_XDP, &key);
             if (!client) {
-                __u32 backend_id = (bpf_get_prandom_u32() % MAX_BE);
-                real_be = backends[backend_id];
+                __u32 be_id = (bpf_get_prandom_u32() % lb->be_count);
+                bpf_printk("backend id %lu",be_id);                
+                struct backend *real_be = bpf_map_lookup_elem(&LB4_BE_XDP, &be_id);
+                if (real_be) {
+                    struct ct val = {
+                        .cl_addr = iph->saddr,
+                        .be = *real_be,
+                    };
 
-                bpf_printk("backend addr %lu ",real_be.s_addr);
-                struct ct val = {
-                    .cl_addr = iph->saddr,
-                    .be = real_be,
-                };
+                    memcpy(val.c_mac,eth->h_source, ETH_ALEN);
+                    bpf_map_update_elem(&LB4_CT_XDP, &key, &val, BPF_NOEXIST);
 
-                memcpy(val.c_mac,eth->h_source, ETH_ALEN);
-                bpf_map_update_elem(&LB4_XDP, &key, &val, BPF_NOEXIST);
+                    // Override mac address
+                    // I hate this do do multiple swaping ip&mac, TODO: optimization
+                    iph->daddr = real_be->s_addr;
+                    memcpy(eth->h_dest, real_be->s_mac, ETH_ALEN);     
+                } else {
+                    bpf_printk("Unknow backend id %lu",be_id);
+                    return XDP_DROP;
+                }
+
             } else {
-                real_be = client->be;
+                // Override mac address
+                iph->daddr = client->be.s_addr;
+                memcpy(eth->h_dest, client->be.s_mac, ETH_ALEN);     
             }
 
-            // Override mac address
-            iph->daddr = real_be.s_addr;
-            memcpy(eth->h_dest, real_be.s_mac, ETH_ALEN);     
-        } else if (bpf_ntohs(tcph->dest) >= 32768) { //This one pkt from lb to client
+        } else if (bpf_ntohs(tcph->dest) >= 32768) { // This pkt was from BE to client and need to change the dst addr from lb ip to client ip
             struct ct_key key = {
                 .dport = tcph->source,
                 .sport = tcph->dest,
                 .dst = iph->daddr,
             };
 
-            struct ct *client = bpf_map_lookup_elem(&LB4_XDP, &key);
+            struct ct *client = bpf_map_lookup_elem(&LB4_CT_XDP, &key);
             if (client) {
                 // Override mac address
                 iph->daddr = client->cl_addr;
@@ -180,15 +190,16 @@ int load_balancer(struct xdp_md *ctx) {
         } else {
             return XDP_DROP;
         }
-    } 
 
-    iph->saddr = lb_ip;
-    memcpy(eth->h_source, lb_mac, ETH_ALEN);
+        iph->saddr = old_lb;
+        memcpy(eth->h_source, lb->lb_mac, ETH_ALEN);
 
-    iph->check = iph_csum(iph);    
+        iph->check = iph_csum(iph);           
+        return XDP_TX;
 
-    
-    return XDP_TX;
+    } else {
+        return XDP_PASS;
+    }
 }
 
 char _license[4] SEC("license") = "GPL";
