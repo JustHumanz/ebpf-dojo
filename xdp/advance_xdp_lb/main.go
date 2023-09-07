@@ -85,7 +85,7 @@ func main() {
 	}
 
 	fmt.Println("Attach prog to iface ", iface)
-	err = netlink.LinkSetXdpFdWithFlags(lo, objs.LoadBalancer.FD(), 0)
+	err = netlink.LinkSetXdpFdWithFlags(lo, objs.LoadBalancer.FD(), 1<<1) //https://github.com/shemminger/iproute2/blob/505c65aa44c58bb772b007b83be560370eba25a6/include/uapi/linux/if_link.h#L1293
 	if err != nil {
 		log.Fatal("failed to attach prog ", err)
 	}
