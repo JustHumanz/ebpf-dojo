@@ -52,7 +52,7 @@ int xdp(struct xdp_md *ctx)
     }
 
     if (bpf_ntohs(udph->dest) == 2525) {
-        bpf_printk("Drop udp pkt, src addr %lu dst port %lu\n",iph->saddr,bpf_ntohs(udph->dest));
+        bpf_printk("Hello world, Drop udp pkt src addr %lu dst port %lu\n",iph->saddr,bpf_ntohs(udph->dest));
         return XDP_DROP;
     }
 
