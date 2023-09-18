@@ -21,17 +21,13 @@ struct lb4_key {
 	 __u16 pad;
 };
 
-struct lb4_service {
-	__u32 count;
-};
-
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, struct lb4_key);
-	__type(value, struct lb4_service);
+	__type(value, __u32);
 	__uint(max_entries, 32);
-} LB4_SERVICES_MAP_V2 SEC(".maps");
+} LB4_SERVICES_MAP SEC(".maps");
 
 
 struct lb4_backend {
@@ -51,18 +47,17 @@ static int fwd(struct bpf_sock_addr *ctx) {
 	__be16 dst_port = ctx_dst_port(ctx);
 	__be32 dst_ip = ctx->user_ip4;
 		
-
 	struct lb4_key svckey = {
 		.address	= dst_ip, 
 		.dport		= dst_port,
-		.pad = 0,
+		.pad 		= 0,
 	};	
 
-	struct lb4_service *svc = bpf_map_lookup_elem(&LB4_SERVICES_MAP_V2, &svckey);
-	if (svc) {
+	__u32 *be_count = bpf_map_lookup_elem(&LB4_SERVICES_MAP, &svckey);
+	if (be_count) {
 		__u32 rand = bpf_get_prandom_u32();
-		__u32 backend_id = (rand % svc->count) + 1;
-		
+		__u32 backend_id = (rand % *be_count)+1;
+		bpf_printk("be id %lu",backend_id);
 		struct lb4_backend * backend = bpf_map_lookup_elem(&LB4_BACKEND_MAP,&backend_id);
 		if (backend) {
 			ctx->user_ip4 = backend->address;

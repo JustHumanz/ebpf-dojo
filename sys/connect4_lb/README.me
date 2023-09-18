@@ -1,0 +1,6 @@
+#### bpftool
+- bpftool prog load connect4_lb.o /sys/fs/bpf/humanz_lb
+- bpftool cgroup attach /sys/fs/cgroup/unified/user.slice connect4 pinned /sys/fs/bpf/humanz_lb
+- bpftool cgroup show /sys/fs/cgroup/unified/user.slice
+- bpftool cgroup detach /sys/fs/cgroup/unified/user.slice cgroup_inet4_connect name connect4_lb
+- bpftool map dump pinned /sys/fs/bpf/humanz_lb
